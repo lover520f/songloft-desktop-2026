@@ -1,10 +1,17 @@
 /**
  * 插件商店 —— 扩展主框架右侧的一栏（框架与左栏见 components/ExtensionFrame.tsx）。
  *
- * 数据来自后端对订阅源的聚合结果（`POST /jsplugins/registry/refresh`）。三件事一律交给
- * 后端判断、前端绝不自己算：**装没装**（installed）、**能不能更新**（has_update）、
- * **是不是撞了别人的 entryPath**（conflict / conflict_with）。版本比较的规则在后端，
- * 前端再实现一遍必然漂移 —— 到时候界面说「可更新」、点了却装不进去。
+ * **两份来源共用这一页**，由搜索框旁边那个下拉切换：
+ *   * 订阅源（后端聚合，`POST /jsplugins/registry/refresh`）—— 默认的那一份；
+ *   * **GitHub 发现**（`GITHUB_DISCOVERY`）—— 按 topic 搜 GitHub 上的社区插件，
+ *     由主进程逐个核对清单与 release 资产（见 hooks/useGithubDiscovery）。
+ *   搜索框与来源下拉是「搜什么 + 搜哪儿」的两半，所以切到发现之后**同一个搜索框**就变成了
+ *   GitHub 搜索（关键词还会顺带搜 owner/repo）。
+ *
+ * 订阅源那一份里，三件事一律交给后端判断、前端绝不自己算：**装没装**（installed）、
+ * **能不能更新**（has_update）、**是不是撞了别人的 entryPath**（conflict / conflict_with）。
+ * 版本比较的规则在后端，前端再实现一遍必然漂移 —— 到时候界面说「可更新」、点了却装不进去。
+ * 发现那一份没有后端可比，判断全在 shared/github-discovery.ts（同样只有一份实现）。
  *
  * `force` 只在点「刷新」时传：后端对订阅源有 5 分钟缓存，翻页与搜索都带上它等于每次都去
  * 重拉一遍远端，又慢又容易撞上源的限流。
@@ -22,8 +29,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import {
+  discoveryInstallState,
+  discoveryRowKey,
+  type DiscoverySession,
+  type GithubDiscoveryPlugin
+} from '@shared/github-discovery'
 import { ApiError } from '@/api/client'
-import { getGithubProxy } from '@/api/endpoints'
+import { getGithubProxy, getVersion } from '@/api/endpoints'
 import {
   getPluginRegistries,
   installFromRegistry,
@@ -32,10 +45,21 @@ import {
   type RegistryEntry,
   type RegistrySource
 } from '@/api/plugins'
-import { IconDownload, IconLoader, IconRefresh, IconSliders, IconStore } from '@/components/Icons'
+import { GithubDiscoveryCard } from '@/components/GithubDiscoveryCard'
+import { GithubTokenDialog } from '@/components/GithubTokenDialog'
+import {
+  IconAlert,
+  IconCloud,
+  IconDownload,
+  IconLoader,
+  IconRefresh,
+  IconSliders,
+  IconStore
+} from '@/components/Icons'
 import { PluginIconFallback } from '@/components/PluginIcon'
 import { EmptyState, InfiniteSentinel } from '@/components/primitives'
 import { RegistrySourcesDialog } from '@/components/RegistrySourcesDialog'
+import { useGithubDiscovery } from '@/hooks/useGithubDiscovery'
 import { buildResourceUrl } from '@/lib/url'
 import { resourceContext, useAuth } from '@/state/useAuth'
 import { usePlugins } from '@/state/usePlugins'
@@ -43,6 +67,31 @@ import { toast } from '@/state/useToasts'
 
 /** 一页拉多少。太小翻页频繁，太大一次请求拿回一堆用不上的 manifest */
 const PAGE_SIZE = 20
+
+/**
+ * 来源下拉里「GitHub 发现」那一格的值。
+ *
+ * ★ 它不是订阅源 URL —— 后端不认识它，`refreshRegistry` 也绝不能收到它。只在**本页内**
+ *   解释：看到它就走 `useGithubDiscovery`，而不是去问后端「这个源有哪些插件」。
+ */
+const GITHUB_DISCOVERY = '__discovery__'
+
+/** 一次安装要交给服务端的那几样东西（两个来源共用同一条路，只有取法不同） */
+interface InstallTarget {
+  /** 正在装的那一行（按来源各自的行 key，只用来点亮按钮） */
+  key: string
+  name: string
+  downloadUrl: string
+  /**
+   * 条目来自哪个订阅源；发现那边留空（GitHub release 是公开的，后端匿名下载即可）。
+   * 后端据此解析该源的 token —— 单源筛选时条目不带这个字段，调用方传当前选中的源。
+   */
+  sourceUrl: string
+  /** 成功回执的动词（安装 / 更新 / 重新安装 / 覆盖安装） */
+  done: string
+  /** 409 时告诉用户「被谁占着」；空串 = 本机已有的同入口插件 */
+  conflictWith: string
+}
 
 export function PluginStore(): React.JSX.Element {
   const client = useAuth((state) => state.client)
@@ -74,6 +123,24 @@ export function PluginStore(): React.JSX.Element {
   const [sourcesOpen, setSourcesOpen] = useState(false)
   const [sourcesToken, setSourcesToken] = useState(0)
 
+  /* GitHub 发现：排序、Token 对话框、服务器版本、本次会话装上的那些 */
+  const [sort, setSort] = useState<'updated' | 'stars'>('updated')
+  const [tokenOpen, setTokenOpen] = useState(false)
+  const [hostVersion, setHostVersion] = useState('')
+  const [discoverySession, setDiscoverySession] = useState<DiscoverySession>({})
+  /** 选中的是「GitHub 发现」而不是某个订阅源 */
+  const discoveryMode = sourceUrl === GITHUB_DISCOVERY
+  const installedPlugins = usePlugins((state) => state.plugins)
+  /**
+   * ★ 没选中「发现」时 `active` 为 false：那个 hook 连一个请求都不发。
+   *   关键词用父组件那份**已防抖**的 —— 搜索框是两半来源共用的同一颗。
+   */
+  const discovery = useGithubDiscovery({
+    active: discoveryMode && client !== null,
+    keyword,
+    sort
+  })
+
   /**
    * 两处一次性标志，刻意用 ref 而不是 state：它们只是「这一次要不要强制」与
    * 「这次拉回来是追加还是替换」，写进 state 会让它们自己成为依赖，进而触发下一轮请求。
@@ -103,8 +170,12 @@ export function PluginStore(): React.JSX.Element {
         setSources(list)
         // 选中的那个源可能刚被删掉或改了地址。留着它的话下一次请求会 400
         // （单源模式的 `registry_url` 指向一个不存在的源），所以退回「全部订阅源」
+        // ★ 「GitHub 发现」不是订阅源，不在这份名单里 —— 不先放行它，读一次源列表
+        //   就会把用户从发现页踢回「全部订阅源」。
         setSourceUrl((current) =>
-          current && !list.some((source) => source.url === current) ? '' : current
+          current === GITHUB_DISCOVERY || !current || list.some((source) => source.url === current)
+            ? current
+            : ''
         )
       })
       .catch(() => undefined)
@@ -114,13 +185,33 @@ export function PluginStore(): React.JSX.Element {
     reloadSources()
   }, [reloadSources, sourcesToken])
 
-  /** 当前筛选的那个源（没筛选时为 undefined） */
+  /** 当前筛选的那个源（没筛选时、或在发现页时为 undefined） */
   const selectedSource = sources.find((source) => source.url === sourceUrl)
   /** 它的 token（没有筛选、或它是公开源时为空串） */
   const sourceToken = selectedSource?.token ?? ''
 
+  /**
+   * 服务器版本：发现页要拿它判 `minHostVersion`（装不上就别让人一路点到失败）。
+   *
+   * 拿不到就留空串 —— `hostCompatibility` 对空串返回 unknown，界面照旧放行（与上游一致：
+   * 一个读不出版本的服务器不该让整个商店不可用）。
+   */
   useEffect(() => {
-    if (!client) return
+    if (!discoveryMode || !client) return
+    let cancelled = false
+    getVersion(client)
+      .then((info) => {
+        if (!cancelled) setHostVersion(info.version ?? '')
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [discoveryMode, client])
+
+  useEffect(() => {
+    // 发现页不归后端那份聚合结果管：切过去时不能再发一次 registry/refresh
+    if (!client || discoveryMode) return
     let cancelled = false
     setLoading(true)
 
@@ -165,7 +256,7 @@ export function PluginStore(): React.JSX.Element {
     }
     // 依赖里放的是 sourceToken 这个**字符串**而不是整份 sources：后者每次读源列表都会换
     // 引用，跟着它重跑等于挂载时白拉一次（用户什么都没改）
-  }, [client, keyword, page, reloadToken, sourceUrl, sourceToken])
+  }, [client, keyword, page, reloadToken, sourceUrl, sourceToken, discoveryMode])
 
   const refresh = (): void => {
     forceRef.current = true
@@ -187,17 +278,22 @@ export function PluginStore(): React.JSX.Element {
     setPage((current) => current + 1)
   }, [loading, hasMore])
 
-  const install = async (entry: RegistryEntry, overwrite = false): Promise<void> => {
-    if (!client) return
-    const key = registryRowKey(entry)
-    setPending(key)
+  /**
+   * 安装 / 更新 / 重新安装的**唯一**那条路。
+   *
+   * 两个来源（订阅源与 GitHub 发现）在这里收口，差别的只有「这一行怎么标已装」——
+   * 那一步留给调用方（各自知道自己的列表长什么样）。
+   *
+   * @returns 装成了没有。false 时调用方什么都不用改（失败提示与 409 询问都在这里做过了）
+   */
+  const runInstall = async (target: InstallTarget, overwrite = false): Promise<boolean> => {
+    if (!client) return false
+    setPending(target.key)
     try {
       if (!proxyRef.current) proxyRef.current = await getGithubProxy(client)
       const result = await installFromRegistry(client, {
-        downloadUrl: entry.downloadUrl,
-        // 聚合模式条目的 sourceUrl 就是它的来源；单源筛选模式下条目不带这个字段，
-        // 那时「来源」就是当前选中的那个源 —— 两种都只是把 URL 交给后端，token 由它自己查
-        sourceUrl: entry.sourceUrl || sourceUrl,
+        downloadUrl: target.downloadUrl,
+        sourceUrl: target.sourceUrl,
         githubProxy: proxyRef.current,
         overwrite
       })
@@ -207,53 +303,138 @@ export function PluginStore(): React.JSX.Element {
       }
       // 同一颗按钮现在有四种含义（安装 / 更新 / 重新安装 / 覆盖安装），回执也跟着说清楚，
       // 否则点了「⟳ v1.2.3」却被告知「已安装」会让人怀疑是不是没生效
-      const done = entry.conflict
-        ? '已覆盖安装'
-        : entry.hasUpdate
-          ? '已更新'
-          : entry.installed
-            ? '已重新安装'
-            : '已安装'
-      toast(`${done}「${entry.name || entry.entryPath}」`, 'success')
+      toast(`${target.done}「${target.name}」`, 'success')
       // 插件列表变了 → 扩展侧栏里要跟着多出一项
       await usePlugins.getState().load()
-      /**
-       * 只把这一行就地改成「已安装」，**不重拉列表**。
-       *
-       * 重拉会把第 1 页追加到现有列表后面（effect 按 `page > 1` 判追加），在翻过几页之后
-       * 等于把已看过的那些再来一遍；退回第 1 页倒是不会重复，但用户的滚动位置就丢了 ——
-       * 装完一个还想接着往下逛，结果被弹回顶上。
-       */
-      setEntries((previous) =>
-        previous.map((item) =>
-          registryRowKey(item) === key
-            ? {
-                ...item,
-                installed: true,
-                installedVersion: item.version,
-                hasUpdate: false,
-                conflict: false,
-                conflictWith: ''
-              }
-            : item
-        )
-      )
+      return true
     } catch (reason) {
       // ★ 409 = 同一个 entryPath 被**另一个作者**的插件占着，后端什么都没写。
       //   必须先问清楚，用户点头了才带 overwrite 重发。
       if (reason instanceof ApiError && reason.status === 409) {
-        const occupant = entry.conflictWith || '本机已有的同入口插件'
+        const occupant = target.conflictWith || '本机已有的同入口插件'
         const ok = window.confirm(
           `${occupant} 占用了同一个入口，继续安装会替换掉它（它的数据也会被清掉）。继续？`
         )
         setPending(null)
-        if (ok) await install(entry, true)
-        return
+        // 这里用 await 而不是直接返回那个 Promise：让外层 finally 等它跑完再松手，
+        // 否则按钮在真正装完之前就恢复成「安装」了
+        if (ok) return await runInstall(target, true)
+        return false
       }
       toast('安装失败', 'error', reason instanceof Error ? reason.message : undefined)
+      return false
     } finally {
       setPending(null)
     }
+  }
+
+  const install = async (entry: RegistryEntry): Promise<void> => {
+    const key = registryRowKey(entry)
+    // 回执按这一行当前的状态挑动词（四档见 StoreCard 的 describeAction）
+    const done = entry.conflict
+      ? '已覆盖安装'
+      : entry.hasUpdate
+        ? '已更新'
+        : entry.installed
+          ? '已重新安装'
+          : '已安装'
+    const installed = await runInstall({
+      key,
+      name: entry.name || entry.entryPath,
+      downloadUrl: entry.downloadUrl,
+      // 聚合模式条目的 sourceUrl 就是它的来源；单源筛选模式下条目不带这个字段，
+      // 那时「来源」就是当前选中的那个源 —— 两种都只是把 URL 交给后端，token 由它自己查
+      sourceUrl: entry.sourceUrl || sourceUrl,
+      done,
+      conflictWith: entry.conflictWith
+    })
+    if (!installed) return
+    /**
+     * 只把这一行就地改成「已安装」，**不重拉列表**。
+     *
+     * 重拉会把第 1 页追加到现有列表后面（effect 按 `page > 1` 判追加），在翻过几页之后
+     * 等于把已看过的那些再来一遍；退回第 1 页倒是不会重复，但用户的滚动位置就丢了 ——
+     * 装完一个还想接着往下逛，结果被弹回顶上。
+     */
+    setEntries((previous) =>
+      previous.map((item) =>
+        registryRowKey(item) === key
+          ? {
+              ...item,
+              installed: true,
+              installedVersion: item.version,
+              hasUpdate: false,
+              conflict: false,
+              conflictWith: ''
+            }
+          : item
+      )
+    )
+  }
+
+  /**
+   * 从 GitHub 发现里装。
+   *
+   * 与订阅源那一条的**唯一**实质差别：这是未经审核的社区插件，必须先让人看见「来源 +
+   * 申请的权限」再点头。撞名（入口被本机另一个插件占着）也一并说在同一段里 ——
+   * 分两次问等于让人在两个弹窗之间来回确认同一件事。
+   */
+  const installDiscovery = async (plugin: GithubDiscoveryPlugin): Promise<void> => {
+    if (!client) return
+    const manifest = plugin.manifest
+    const state = discoveryInstallState({
+      plugin,
+      installed: installedPlugins,
+      hostVersion,
+      session: discoverySession
+    })
+    if (state.action === 'blocked') return
+
+    const permissions = manifest.permissions.length ? manifest.permissions.join('、') : '无'
+    const replace =
+      state.action === 'overwrite' && state.occupant
+        ? `\n\n入口 ${manifest.entryPath} 已被「${
+            state.occupant.name || state.occupant.entryPath
+          } v${state.occupant.version}」占用，安装会替换它（它的数据也会被清掉）。`
+        : ''
+    const ok = window.confirm(
+      `将 ${plugin.repository.fullName} 的「${manifest.name}」v${manifest.version} 安装到当前服务器？\n\n` +
+        `此插件未经 Songloft 审核，请先确认来源与申请的权限。\n申请的权限：${permissions}${replace}`
+    )
+    if (!ok) return
+
+    const done =
+      state.action === 'overwrite'
+        ? '已覆盖安装'
+        : state.action === 'update'
+          ? '已更新'
+          : state.action === 'reinstall'
+            ? '已重新安装'
+            : '已安装'
+    const installed = await runInstall(
+      {
+        key: discoveryRowKey(plugin),
+        name: manifest.name,
+        downloadUrl: plugin.downloadUrl,
+        sourceUrl: '',
+        done,
+        conflictWith: state.occupant
+          ? `${state.occupant.name || state.occupant.entryPath} v${state.occupant.version}`
+          : ''
+      },
+      // 上面已经说过「会替换它」了，不再让 409 弹第二遍
+      state.action === 'overwrite'
+    )
+    if (!installed) return
+    // 插件包装上之后服务端那份清单里多半没有下载地址，认不出「它是这个仓库的」——
+    // 记一笔，卡片才不会当场翻成「覆盖安装」
+    setDiscoverySession((previous) => ({
+      ...previous,
+      [manifest.entryPath]: {
+        repositoryId: plugin.repository.id,
+        version: manifest.version
+      }
+    }))
   }
 
   /** 源改过之后：商店那份列表与筛选选项都得重新来过（后端也会顺手作废它的缓存） */
@@ -262,6 +443,25 @@ export function PluginStore(): React.JSX.Element {
     setPage(1)
     setReloadToken((token) => token + 1)
   }
+
+  /* 发现页底部那一行统计：被过滤掉的（发布格式不合规）与暂时没核对成的要分开说 */
+  const discoveryExcluded =
+    (discovery.failures.invalidManifest ?? 0) +
+    (discovery.failures.invalidRelease ?? 0) +
+    (discovery.failures.unpublished ?? 0)
+  const discoveryUnverified =
+    (discovery.failures.unavailable ?? 0) + (discovery.failures.rateLimited ?? 0)
+  /** 限流会告诉我们什么时候能再试；有就带上，没有就不提 */
+  const retryHint = discovery.retryAt
+    ? ` ${new Date(discovery.retryAt).toLocaleTimeString()} 后可重试。`
+    : ''
+
+  const discoveryErrorTitle =
+    discovery.error?.reason === 'invalidToken'
+      ? 'GitHub Token 无效'
+      : discovery.error?.reason === 'rateLimited'
+        ? '已达到 GitHub 请求限额'
+        : '加载 GitHub 发现失败'
 
   return (
     <div className="page">
@@ -272,19 +472,53 @@ export function PluginStore(): React.JSX.Element {
             插件商店
           </h1>
           <p className="page-subtitle">
-            列表来自服务端的扩展订阅源，安装与更新都在服务端完成。
-            {total > 0 ? ` 已载入 ${entries.length} / ${total} 个。` : ''}
+            {discoveryMode
+              ? '按 GitHub 上的 songloft-plugin topic 自动发现社区插件；列出来的每一条都核对过清单与发布资产，安装仍在服务端完成。'
+              : '列表来自服务端的扩展订阅源，安装与更新都在服务端完成。'}
+            {discoveryMode
+              ? discovery.plugins.length > 0
+                ? ` 已载入 ${discovery.plugins.length} 个。`
+                : ''
+              : total > 0
+                ? ` 已载入 ${entries.length} / ${total} 个。`
+                : ''}
           </p>
         </div>
 
         <div className="row">
-          <button type="button" className="btn" data-size="sm" onClick={() => setSourcesOpen(true)}>
-            <IconSliders size={14} />
-            管理订阅源
-          </button>
-          <button type="button" className="btn" data-size="sm" onClick={refresh}>
+          {discoveryMode ? (
+            <button
+              type="button"
+              className="btn"
+              data-size="sm"
+              // 未配置时把这个状态直接写在按钮上：匿名只有 60 次/小时，翻两页就会撞上
+              // Token 存在服务端，没有会话就无处可读、也无处可存
+              data-tip={client ? undefined : '先连接服务器'}
+              disabled={!client}
+              onClick={() => setTokenOpen(true)}
+            >
+              <IconCloud size={14} />
+              {discovery.token ? 'GitHub Token' : 'GitHub Token（未配置）'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn"
+              data-size="sm"
+              onClick={() => setSourcesOpen(true)}
+            >
+              <IconSliders size={14} />
+              管理订阅源
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn"
+            data-size="sm"
+            onClick={discoveryMode ? discovery.refresh : refresh}
+          >
             <IconRefresh size={14} />
-            刷新商店
+            {discoveryMode ? '刷新' : '刷新商店'}
           </button>
         </div>
       </div>
@@ -296,7 +530,8 @@ export function PluginStore(): React.JSX.Element {
           className="input"
           type="search"
           value={input}
-          placeholder="搜索扩展…"
+          // 发现页那一份搜的是 GitHub：关键词还会顺带搜 owner/repo，所以提示得跟着换
+          placeholder={discoveryMode ? '搜索扩展或 owner/repo…' : '搜索扩展…'}
           aria-label="搜索扩展"
           style={{ maxWidth: 420 }}
           onChange={(event) => setInput(event.target.value)}
@@ -312,94 +547,253 @@ export function PluginStore(): React.JSX.Element {
             setReloadToken((token) => token + 1)
           }}
         >
-          <option value="">全部订阅源</option>
-          {sources.map((source) => (
-            <option key={source.url} value={source.url}>
-              {source.name || source.url}
-              {/* 停用的源不在聚合结果里，但单独看它是允许的 —— 标出来才不会被当成「源没了」 */}
-              {source.enabled ? '' : '（已停用）'}
-            </option>
-          ))}
+          <optgroup label="订阅源">
+            <option value="">全部订阅源</option>
+            {sources.map((source) => (
+              <option key={source.url} value={source.url}>
+                {source.name || source.url}
+                {/* 停用的源不在聚合结果里，但单独看它是允许的 —— 标出来才不会被当成「源没了」 */}
+                {source.enabled ? '' : '（已停用）'}
+              </option>
+            ))}
+          </optgroup>
+          {/*
+            ★ 这一格不是订阅源，而是**另一份来源**（见本文件顶部那段）。
+            它不进 sources，也不发给后端；选中它之后这一页换由 useGithubDiscovery 供数。
+          */}
+          <optgroup label="社区">
+            <option value={GITHUB_DISCOVERY}>GitHub 发现</option>
+          </optgroup>
         </select>
+        {discoveryMode ? (
+          <select
+            className="input"
+            value={sort}
+            aria-label="发现排序"
+            style={{ width: 132, flex: 'none' }}
+            onChange={(event) => setSort(event.target.value === 'stars' ? 'stars' : 'updated')}
+          >
+            <option value="updated">最近更新</option>
+            <option value="stars">最多 Stars</option>
+          </select>
+        ) : null}
       </div>
 
-      {warnings.length ? (
-        <p className="field-hint" style={{ marginTop: 10 }}>
-          {warnings.join(' · ')}
-        </p>
-      ) : null}
+      {discoveryMode ? (
+        <>
+          {/* 这一句是**免责**而不是说明：社区插件没过审核，格式校验也不等于安全审核 */}
+          <p className="field-hint" style={{ marginTop: 10 }}>
+            {
+              // 用字符串而不是裸文本：JSX 文本换行会变成一个空格，中文句子里看着像排错了
+              '自动发现 GitHub 社区插件，未经 Songloft 审核；格式校验不代表安全审核。安装前请自行确认源码与申请的权限。'
+            }
+            {!client || discovery.credentialLoading || discovery.token
+              ? ''
+              : ' 未配置 GitHub Token 时匿名访问每小时只有 60 次，一页发现就可能用光。'}
+          </p>
 
-      {error ? (
-        <EmptyState
-          icon={<IconStore size={26} />}
-          title="插件商店打不开"
-          description={error}
-          action={
-            <button type="button" className="btn" data-size="sm" onClick={refresh}>
-              重试
-            </button>
-          }
-        />
-      ) : null}
+          {discovery.error && discovery.plugins.length > 0 ? (
+            <div className="probe-result" data-state="error" style={{ marginTop: 10 }}>
+              <IconAlert size={15} />
+              <span>
+                {discovery.error.message}
+                {retryHint}
+              </span>
+            </div>
+          ) : null}
 
-      {!error && !loading && entries.length === 0 ? (
-        <EmptyState
-          icon={<IconStore size={26} />}
-          title={keyword ? '没有匹配的扩展' : '商店里还没有扩展'}
-          description={
-            keyword
-              ? '换个关键词试试，或把筛选切回「全部订阅源」。'
-              : selectedSource
-                ? `「${selectedSource.name || selectedSource.url}」里没有可装的扩展。`
-                : sources.length === 0
-                  ? '还没有配置订阅源 —— 点右上角「管理订阅源」加一个。'
-                  : '已配置的订阅源里没有可装的扩展。'
-          }
-        />
-      ) : null}
-
-      {!error && entries.length > 0 ? (
-        <ul className="store-grid">
-          {entries.map((entry) => (
-            <StoreCard
-              key={registryRowKey(entry)}
-              entry={entry}
-              pending={pending === registryRowKey(entry)}
-              disabled={pending !== null && pending !== registryRowKey(entry)}
-              onInstall={() => void install(entry)}
+          {discovery.error && discovery.plugins.length === 0 ? (
+            <EmptyState
+              icon={<IconCloud size={26} />}
+              title={discoveryErrorTitle}
+              description={`${discovery.error.message}${retryHint}`}
+              action={
+                <div className="row">
+                  {discovery.error.reason === 'invalidToken' ? (
+                    <button
+                      type="button"
+                      className="btn"
+                      data-size="sm"
+                      onClick={() => setTokenOpen(true)}
+                    >
+                      修改 Token
+                    </button>
+                  ) : null}
+                  <button type="button" className="btn" data-size="sm" onClick={discovery.refresh}>
+                    重试
+                  </button>
+                </div>
+              }
             />
-          ))}
-        </ul>
-      ) : null}
+          ) : null}
 
-      {/* 头一页还在路上：摆与真实卡片同构的骨架屏（见 StoreGridSkeleton）。
-          转圈图标只说得清「在忙」，说不清「待会儿这儿会长出什么」——数据一回来卡片凭空冒出来，
-          视线得重新找一遍位置 */}
-      {!error && loading && entries.length === 0 ? <StoreGridSkeleton /> : null}
+          {!discovery.error && !discovery.loading && discovery.plugins.length === 0 ? (
+            <EmptyState
+              icon={<IconCloud size={26} />}
+              // 没有会话时这一页**什么都没查**，说「没发现」会让人以为 GitHub 上真的没有
+              title={
+                !client ? '需要连接服务器' : keyword ? '没有匹配的扩展' : '没有发现可用的社区扩展'
+              }
+              description={
+                !client
+                  ? '「GitHub 发现」的 Token 与安装都由服务器完成；先连接一台服务器再来。'
+                  : keyword
+                    ? '换个关键词试试（也可以直接搜 owner/repo）。'
+                    : discoveryUnverified
+                      ? '有仓库暂时没能核对（GitHub 限流或网络），稍后重试；配置 Token 后配额高得多。'
+                      : 'GitHub 上没有找到同时满足「topic + 清单格式 + Release 资产」的仓库 —— 这不代表社区里没有插件，也可能只是还没按发现规则发布。'
+              }
+            />
+          ) : null}
 
-      {/* 续页时只在列表底部放一枚转圈的指示，不摆骨架屏：骨架会把已有的行往下推 */}
-      {!error && loading && entries.length > 0 ? (
-        <div className="empty" style={{ padding: '14px 0' }}>
-          <IconLoader size={18} />
-        </div>
-      ) : null}
+          {discovery.plugins.length > 0 ? (
+            <ul className="store-grid">
+              {discovery.plugins.map((plugin) => {
+                const key = discoveryRowKey(plugin)
+                const state = discoveryInstallState({
+                  plugin,
+                  installed: installedPlugins,
+                  hostVersion,
+                  session: discoverySession
+                })
+                return (
+                  <GithubDiscoveryCard
+                    key={key}
+                    plugin={plugin}
+                    state={state}
+                    pending={pending === key}
+                    disabled={pending !== null && pending !== key}
+                    onInstall={() => void installDiscovery(plugin)}
+                  />
+                )
+              })}
+            </ul>
+          ) : null}
 
-      {/*
-        到底的提示。★ 不能省：无限滚动的列表滚到底时「不再长出新行」与「卡住了」
-        在屏幕上长得一模一样，用户只能靠反复上下来回滚来确认。给一句话，滚到底这件事
-        就有了明确的下文。
-        列表为空时走上面那条空态，所以这里要求 entries 非空。
-      */}
-      {!error && !loading && entries.length > 0 && !hasMore ? (
-        <p className="list-end">已经到底了</p>
-      ) : null}
+          {!discovery.error && discovery.loading && discovery.plugins.length === 0 ? (
+            <StoreGridSkeleton />
+          ) : null}
 
-      {/* key 跟着页码走：内容不够高时哨兵仍在视口里，观察器不会再来一次 —— 换一个元素
-          重新挂观察器，它会立刻以「当前可见」回调一次，列表就能一路续到填满视口为止 */}
-      {!error && hasMore ? <InfiniteSentinel key={page} onVisible={loadMore} /> : null}
+          {discovery.loadingMore ? (
+            <div className="empty" style={{ padding: '14px 0' }}>
+              <IconLoader size={18} />
+            </div>
+          ) : null}
+
+          {/*
+            统计行兼两用：它同时是「到底了」的提示 —— 无限滚动列表滚到底时
+            「不再长出新行」与「卡住了」在屏幕上长得一模一样。
+          */}
+          {!discovery.loading && (discovery.checked > 0 || discovery.plugins.length > 0) ? (
+            <p className="list-end">
+              已检查 {discovery.checked} 个仓库 · 发现 {discovery.plugins.length} 个插件
+              {discoveryExcluded ? ` · 过滤 ${discoveryExcluded} 个` : ''}
+              {discoveryUnverified ? ` · 暂未验证 ${discoveryUnverified} 个` : ''}
+              {discovery.incomplete ? ' · 当前为部分结果' : ''}
+            </p>
+          ) : null}
+
+          {/* key 跟着已载入的条数走：内容不够高时哨兵仍在视口里，观察器不会再来一次 ——
+              换一个元素重挂观察器，它会立刻以「当前可见」回调一次，列表就能一路续到填满 */}
+          {discovery.hasMore && !discovery.error ? (
+            <InfiniteSentinel
+              key={`discovery-${discovery.plugins.length}`}
+              onVisible={discovery.loadMore}
+              disabled={discovery.loadingMore}
+            />
+          ) : null}
+        </>
+      ) : (
+        <>
+          {warnings.length ? (
+            <p className="field-hint" style={{ marginTop: 10 }}>
+              {warnings.join(' · ')}
+            </p>
+          ) : null}
+
+          {error ? (
+            <EmptyState
+              icon={<IconStore size={26} />}
+              title="插件商店打不开"
+              description={error}
+              action={
+                <button type="button" className="btn" data-size="sm" onClick={refresh}>
+                  重试
+                </button>
+              }
+            />
+          ) : null}
+
+          {!error && !loading && entries.length === 0 ? (
+            <EmptyState
+              icon={<IconStore size={26} />}
+              title={keyword ? '没有匹配的扩展' : '商店里还没有扩展'}
+              description={
+                keyword
+                  ? '换个关键词试试，或把筛选切回「全部订阅源」。'
+                  : selectedSource
+                    ? `「${selectedSource.name || selectedSource.url}」里没有可装的扩展。`
+                    : sources.length === 0
+                      ? '还没有配置订阅源 —— 点右上角「管理订阅源」加一个。'
+                      : '已配置的订阅源里没有可装的扩展。'
+              }
+            />
+          ) : null}
+
+          {!error && entries.length > 0 ? (
+            <ul className="store-grid">
+              {entries.map((entry) => (
+                <StoreCard
+                  key={registryRowKey(entry)}
+                  entry={entry}
+                  pending={pending === registryRowKey(entry)}
+                  disabled={pending !== null && pending !== registryRowKey(entry)}
+                  onInstall={() => void install(entry)}
+                />
+              ))}
+            </ul>
+          ) : null}
+
+          {/* 头一页还在路上：摆与真实卡片同构的骨架屏（见 StoreGridSkeleton）。
+              转圈图标只说得清「在忙」，说不清「待会儿这儿会长出什么」——数据一回来卡片凭空冒出来，
+              视线得重新找一遍位置 */}
+          {!error && loading && entries.length === 0 ? <StoreGridSkeleton /> : null}
+
+          {/* 续页时只在列表底部放一枚转圈的指示，不摆骨架屏：骨架会把已有的行往下推 */}
+          {!error && loading && entries.length > 0 ? (
+            <div className="empty" style={{ padding: '14px 0' }}>
+              <IconLoader size={18} />
+            </div>
+          ) : null}
+
+          {/*
+            到底的提示。★ 不能省：无限滚动的列表滚到底时「不再长出新行」与「卡住了」
+            在屏幕上长得一模一样，用户只能靠反复上下来回滚来确认。给一句话，滚到底这件事
+            就有了明确的下文。
+            列表为空时走上面那条空态，所以这里要求 entries 非空。
+          */}
+          {!error && !loading && entries.length > 0 && !hasMore ? (
+            <p className="list-end">已经到底了</p>
+          ) : null}
+
+          {/* key 跟着页码走：内容不够高时哨兵仍在视口里，观察器不会再来一次 —— 换一个元素
+              重新挂观察器，它会立刻以「当前可见」回调一次，列表就能一路续到填满视口为止 */}
+          {!error && hasMore ? <InfiniteSentinel key={page} onVisible={loadMore} /> : null}
+        </>
+      )}
 
       {sourcesOpen ? (
         <RegistrySourcesDialog onClose={() => setSourcesOpen(false)} onSaved={onSourcesSaved} />
+      ) : null}
+
+      {tokenOpen ? (
+        <GithubTokenDialog
+          token={discovery.token}
+          loading={discovery.credentialLoading}
+          loadError={discovery.credentialError}
+          onSave={discovery.saveToken}
+          onClose={() => setTokenOpen(false)}
+        />
       ) : null}
     </div>
   )
