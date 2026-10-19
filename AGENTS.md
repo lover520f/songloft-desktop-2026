@@ -112,6 +112,7 @@ src/
 │  ├─ probe.ts        后端探测（本地 Blob 解码，避免为它关掉 webSecurity）
 │  ├─ local-files.ts  本地文件的收件口：启动参数 / macOS open-file / 文件对话框（排队 + 摇铃）
 │  ├─ media-protocol.ts 本地文件的媒体协议 songloft-media://（按 Range 读字节；见 §8.16）
+│  ├─ github-discovery.ts 「GitHub 发现」的请求与逐仓库核对（缓存 / 限流 / Token；见 §8.12）
 │  ├─ tray.ts         托盘图标与菜单
 │  └─ app-menu.ts     应用菜单（窗口无边框、看不到菜单栏，但它提供全局加速键）
 ├─ preload/        contextBridge 白名单 —— 渲染层唯一的对外通道（window.songloft）
@@ -125,6 +126,7 @@ src/
 │  ├─ local-file.ts   本地文件播放：路径 ↔ 可播放地址 ↔ Song 的换算 + Range 解析（§8.16）
 │  ├─ data.ts         两份数据快照是否等价（页面切回时的**静默刷新**靠它判断「要不要动界面」）
 │  ├─ metadata.ts     元数据缺口判定 / 「只补缺失」的合并 / 封面与标题的降级口径
+│  ├─ github-discovery.ts 「GitHub 发现」的纯逻辑：清单 / Release 校验、搜索语句、卡片状态（§8.12）
 │  ├─ window-role.ts  「这个渲染进程是哪种窗口」的契约（主进程写 hash、渲染层读；见 §8.17）
 │  ├─ version.ts      版本号比较（认不出来的写法一律判「不比它新」，宁可少提示一次更新）
 │  └─ links.ts        对外 URL 常量（本仓库 / 上游）
@@ -159,9 +161,11 @@ src/
    │                 （同目录的 ../MiniApp.tsx 是那个窗口的根，与 App.tsx 并列）
    │                 ExtensionFrame（扩展主框架：左侧栏 + 右内容面）/
    │                 PluginSurface（扩展 webview 栈）/ PluginIcon /
-   │                 RegistrySourcesDialog（管理订阅源）
+   │                 RegistrySourcesDialog（管理订阅源）/
+   │                 GithubDiscoveryCard（发现页的卡片）/ GithubTokenDialog（发现页的凭据）
    ├─ hooks/         useSongList / usePlaylistSongs / useAsync / useResponsiveSidebar /
    │                 usePageActive（页面槽的「我看得见吗」，见 §4 的页面槽那段）/
+   │                 useGithubDiscovery（商店里「GitHub 发现」那一份，见 §8.12）/
    │                 useHorizontalScroll（溢出时才出的横向滚动条）
    ├─ lib/           url（资源 URL 拼接）/ color / accent / format / concurrency /
    │                 responsive（断点判定，纯函数）/
@@ -553,6 +557,29 @@ query 回退分支）—— 按「像不像外链」判断会让整店退成首�
 改地址等于换一个源、重复地址必须在客户端先拦住；**单源筛选**（`all_sources: false` +
 `registry_url`）时后端**不会**去读它存的那份配置，私有源的 token 必须由调用方一起带上 ——
 漏了只会得到一句「拉取注册表失败」，完全看不出是缺 token。
+
+**「GitHub 发现」是来源下拉里的第三类东西**（`PluginStore` 的 `GITHUB_DISCOVERY`）：它**不是**
+订阅源 —— 不进 `sources`、不发给 `/jsplugins/registry/*`。选中它之后这一页改由
+`hooks/useGithubDiscovery` 供数，搜索框那一份关键词同时变成 GitHub 搜索词（还会顺带搜
+`owner/repo`）。四条容易做错的：
+
+* **每个仓库都要核对，不能把搜索结果的标题直接列出来**。发现 = 一次搜索 + 每仓库两份读取
+  （默认分支的 `plugin.json` + 它声明的 release 资产）。列出来的每一条都必须是「点安装就能装
+  上」的 —— 否则用户点下去才失败，而失败的原因（作者还没发布）离这个界面很远。判定全在
+  `shared/github-discovery.ts`（清单 / Release 校验、版本比较、卡片状态），主进程与界面共用
+  同一份，别在组件里另写一套。
+* **网络在主进程**（`main/github-discovery.ts`，IPC `github:discover`）：与 `release.ts` 同一条
+  理由（渲染层不直连第三方），而且一页就是几十个请求，清单缓存与「Token 过期 / 限流 / 网络」
+  的分类只该有一处。失败以 `{ ok: false, reason }` 回来，**不抛异常** —— 跨 IPC 只剩一句
+  message，界面没法按原因分派「改 Token / 等一会儿 / 查代理」。
+* **Token 存服务端**（`GET|PUT /settings/github-discovery-token`，与私有源 token 同一套语义），
+  匿名每小时只有 60 次，一页 20 个仓库就可能用光；配了 Token 的请求**刻意绕过**加速代理并禁
+  重定向（前缀式代理会丢掉 `Authorization`，凭据也不该跟着 302 跑）。代理仍是给匿名请求套的
+  前缀，两者互斥（见 `api/endpoints.ts` 那两个函数）。
+* **安装走同一条 `runInstall`**，只有 `source_url` 为空（GitHub release 是公开的，后端匿名下载）
+  与「先确认来源 + 权限」那一步不同。插件包装上之后服务端那份清单多半没有 `download_url`，
+  于是 `discoveryInstallState` 会认不出「它就是刚才这个仓库的」—— 所以本页记一份
+  `DiscoverySession`（`entryPath → repoId + version`），否则卡片会当场翻成「覆盖安装」。
 
 ### 8.13 整窗透明度 = 透明窗口 + 整棵树 opacity，缺一半都只是「变暗」
 

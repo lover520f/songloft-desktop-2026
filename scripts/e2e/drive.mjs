@@ -480,6 +480,14 @@ window.__t = {
     storeNames: vis('.store-card .store-card-name').map((e) => (e.textContent || '').trim()),
     storeActions: vis('.store-card-action').map((e) => (e.textContent || '').trim()),
     storeCodes: vis('.store-card .store-card-code').map((e) => (e.textContent || '').trim()),
+    /*
+     * 来源下拉里的每一格。
+     * ★ 「GitHub 发现」不是订阅源（它不进 mock 的源列表），只在这一格里出现 ——
+     *   所以只能这样断言它确实接上了，不能拿 sourceNames 去查。
+     */
+    storeSources: vis('select[aria-label="筛选订阅源"] option').map((e) =>
+      (e.textContent || '').trim()
+    ),
     /** 订阅源对话框里的源行数（每行一颗开关 + 两个输入框） */
     sourceRows: vis('.source-row').length,
     /*
@@ -1112,7 +1120,8 @@ const STEPS = [
       surface: exactly('extensions'),
       extNavs: containsAll('插件商店', '插件管理'),
       storeNames: containsAll('封面墙', '歌词补全', '豆瓣标签', '专辑墙'),
-      storeActions: containsAll('安装', '更新至 v1.3.0', 'v0.9.3', '覆盖安装')
+      storeActions: containsAll('安装', '更新至 v1.3.0', 'v0.9.3', '覆盖安装'),
+      storeSources: containsAll('全部订阅源', '官方源', 'GitHub 发现')
     }
   ],
   /*
