@@ -268,7 +268,11 @@ export function releaseDownload(
   try {
     const url = publicRepositoryUrl(address)
     const prefix = `/${repository}/releases/download/`
-    if (!url || url.host !== 'github.com' || !url.path.toLowerCase().startsWith(prefix.toLowerCase())) {
+    if (
+      !url ||
+      url.host !== 'github.com' ||
+      !url.path.toLowerCase().startsWith(prefix.toLowerCase())
+    ) {
       return null
     }
     const parts = url.path.slice(prefix.length).split('/')
@@ -307,7 +311,9 @@ export function discoverySearchQuery(search: string): string {
 }
 
 /** 搜索地址（排序与翻页都在 query 里） */
-export function discoverySearchUrl(request: Pick<GithubDiscoveryRequest, 'page' | 'search' | 'sort'>): string {
+export function discoverySearchUrl(
+  request: Pick<GithubDiscoveryRequest, 'page' | 'search' | 'sort'>
+): string {
   const query = encodeURIComponent(discoverySearchQuery(request.search))
   return `https://api.github.com/search/repositories?q=${query}&sort=${request.sort}&order=desc&per_page=${DISCOVERY_PAGE_SIZE}&page=${request.page}`
 }
@@ -348,7 +354,8 @@ export function toGithubRepository(value: unknown): GithubRepository | null {
  * 认不出返回 null —— 调用方据此判「不比它新」，不拿看不懂的字符串吓人。
  */
 export function comparePluginVersions(a: string, b: string): number | null {
-  const pattern = /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(?:\.(0|[1-9][0-9]{0,8}))?$/
+  const pattern =
+    /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(?:\.(0|[1-9][0-9]{0,8}))?$/
   const left = a.replace(/^v/, '')
   const right = b.replace(/^v/, '')
   if (!pattern.test(left) || !pattern.test(right)) return null
@@ -432,7 +439,8 @@ export function discoveryInstallState(input: {
     : ''
   const comparison = comparePluginVersions(plugin.manifest.version, installedVersion)
   const hasUpdate = sameRepository && comparison != null && comparison > 0
-  const incompatible = hostCompatibility(plugin.manifest.minHostVersion, hostVersion) === 'incompatible'
+  const incompatible =
+    hostCompatibility(plugin.manifest.minHostVersion, hostVersion) === 'incompatible'
 
   const action: DiscoveryAction = incompatible
     ? 'blocked'
@@ -535,7 +543,9 @@ export function verifyRelease(
       item.size > 0 &&
       item.state === 'uploaded'
   )
-  return asset ? { ok: true, publishedAt: release.publishedAt } : { ok: false, failure: 'unpublished' }
+  return asset
+    ? { ok: true, publishedAt: release.publishedAt }
+    : { ok: false, failure: 'unpublished' }
 }
 
 /**

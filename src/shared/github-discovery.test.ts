@@ -110,7 +110,13 @@ describe('parseGithubPluginManifest', () => {
   })
 
   it('拒绝越界的 main、非法版本、非法 entryPath 与坏 hash', () => {
-    const base = { name: '插件名', version: '1.0.0', entryPath: 'ok', main: 'main.js', permissions: [] }
+    const base = {
+      name: '插件名',
+      version: '1.0.0',
+      entryPath: 'ok',
+      main: 'main.js',
+      permissions: []
+    }
     expect(() => parseGithubPluginManifest({ ...base, main: '../evil.js' })).toThrow()
     expect(() => parseGithubPluginManifest({ ...base, main: 'main.css' })).toThrow()
     expect(() => parseGithubPluginManifest({ ...base, version: 'v1.0.0' })).toThrow()
@@ -159,22 +165,18 @@ describe('URL 解析', () => {
     expect(
       isRepositoryMetadataUrl('https://raw.githubusercontent.com/a/b/main/plugin.json', 'a/b')
     ).toBe(true)
-    expect(
-      isRepositoryMetadataUrl('https://github.com/a/b/raw/main/plugin.json', 'a/b')
-    ).toBe(true)
+    expect(isRepositoryMetadataUrl('https://github.com/a/b/raw/main/plugin.json', 'a/b')).toBe(true)
     expect(
       isRepositoryMetadataUrl('https://raw.githubusercontent.com/c/d/main/plugin.json', 'a/b')
     ).toBe(false)
-    expect(isRepositoryMetadataUrl('https://raw.githubusercontent.com/a/b/main/x.json', 'a/b')).toBe(
-      true
-    )
+    expect(
+      isRepositoryMetadataUrl('https://raw.githubusercontent.com/a/b/main/x.json', 'a/b')
+    ).toBe(true)
   })
 
   it('release 下载地址只认 .jsplugin.zip', () => {
     expect(
-      parseReleaseDownload(
-        'https://github.com/a/b/releases/download/v1.0.0/p.jsplugin.zip'
-      )
+      parseReleaseDownload('https://github.com/a/b/releases/download/v1.0.0/p.jsplugin.zip')
     ).toEqual({ repository: 'a/b', tag: 'v1.0.0', file: 'p.jsplugin.zip' })
     expect(
       parseReleaseDownload('https://github.com/a/b/releases/download/v1.0.0/source.tar.gz')
@@ -204,9 +206,14 @@ describe('版本', () => {
 
 describe('已装状态', () => {
   it('没装过 → 安装', () => {
-    expect(discoveryInstallState({ plugin: discovery(), installed: [], hostVersion: '1.0.0', session: {} }).action).toBe(
-      'install'
-    )
+    expect(
+      discoveryInstallState({
+        plugin: discovery(),
+        installed: [],
+        hostVersion: '1.0.0',
+        session: {}
+      }).action
+    ).toBe('install')
   })
 
   it('updateUrl 指回同一个仓库 → 同源，且能判出可更新 / 已最新', () => {
@@ -214,8 +221,12 @@ describe('已装状态', () => {
       updateUrl: 'https://raw.githubusercontent.com/someone/songloft-plugin-radio/main/plugin.json'
     })
     expect(
-      discoveryInstallState({ plugin: discovery(), installed: [occupant], hostVersion: '1.0.0', session: {} })
-        .action
+      discoveryInstallState({
+        plugin: discovery(),
+        installed: [occupant],
+        hostVersion: '1.0.0',
+        session: {}
+      }).action
     ).toBe('update')
     expect(
       discoveryInstallState({
@@ -278,7 +289,12 @@ describe('release 校验', () => {
       draft: false,
       prerelease: false,
       assets: [
-        { name: 'radio-time.jsplugin.zip', browser_download_url: url, size: 1024, state: 'uploaded' }
+        {
+          name: 'radio-time.jsplugin.zip',
+          browser_download_url: url,
+          size: 1024,
+          state: 'uploaded'
+        }
       ],
       ...extra
     }
@@ -323,9 +339,7 @@ describe('release 校验', () => {
     expect(
       verifyRelease(
         release({
-          assets: [
-            { name: download.file, browser_download_url: url, size: 0, state: 'uploaded' }
-          ]
+          assets: [{ name: download.file, browser_download_url: url, size: 0, state: 'uploaded' }]
         }),
         download,
         url
@@ -371,11 +385,14 @@ describe('仓库过滤', () => {
 describe('applyGithubProxy', () => {
   it('只在 GitHub 域名上套前缀，并把结尾的斜杠补齐', () => {
     expect(
-      applyGithubProxy('https://raw.githubusercontent.com/a/b/main/plugin.json', 'https://ghfast.top')
+      applyGithubProxy(
+        'https://raw.githubusercontent.com/a/b/main/plugin.json',
+        'https://ghfast.top'
+      )
     ).toBe('https://ghfast.top/https://raw.githubusercontent.com/a/b/main/plugin.json')
-    expect(applyGithubProxy('https://api.github.com/search/repositories', 'https://ghfast.top/')).toBe(
-      'https://ghfast.top/https://api.github.com/search/repositories'
-    )
+    expect(
+      applyGithubProxy('https://api.github.com/search/repositories', 'https://ghfast.top/')
+    ).toBe('https://ghfast.top/https://api.github.com/search/repositories')
   })
 
   it('空代理、不像前缀的写法、非 GitHub 地址一律原样返回', () => {
