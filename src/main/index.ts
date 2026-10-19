@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path'
 import { BrowserWindow, app, ipcMain, session, shell } from 'electron'
 
 import type { StoredCredentials } from '@shared/bridge-types'
+import type { GithubDiscoveryRequest } from '@shared/github-discovery'
 import {
   IPC,
   type AppInfo,
@@ -26,6 +27,7 @@ import {
 } from '@shared/ipc'
 import { installAppMenu } from './app-menu'
 import { applyLocalCacheLimit, clearLocalCache, readLocalCache } from './cache'
+import { discoverGithubPlugins } from './github-discovery'
 import { checkClientUpdate } from './release'
 import { openTextFile, saveTextFile } from './files'
 import {
@@ -631,6 +633,9 @@ function registerIpcHandlers(): void {
   }))
   ipcMain.handle(IPC.clientUpdateCheck, (_event, proxyPrefix?: string) =>
     checkClientUpdate(proxyPrefix)
+  )
+  ipcMain.handle(IPC.githubDiscovery, (_event, request: GithubDiscoveryRequest) =>
+    discoverGithubPlugins(request)
   )
 }
 

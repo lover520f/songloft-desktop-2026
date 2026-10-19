@@ -26,6 +26,7 @@ import type {
   WindowState
 } from '@shared/ipc'
 import type { CoverBytes, SongloftBridge, StoredCredentials } from '@shared/bridge'
+import type { GithubDiscoveryRequest, GithubDiscoveryResult } from '@shared/github-discovery'
 
 function subscribe<T>(channel: string, handler: (payload: T) => void): () => void {
   const listener = (_event: Electron.IpcRendererEvent, payload: T): void => handler(payload)
@@ -97,6 +98,10 @@ const bridge: SongloftBridge = {
     info: () => ipcRenderer.invoke(IPC.appInfo),
     checkClientUpdate: (proxyPrefix) =>
       ipcRenderer.invoke(IPC.clientUpdateCheck, proxyPrefix) as Promise<ClientUpdateCheck>
+  },
+  github: {
+    discover: (request: GithubDiscoveryRequest) =>
+      ipcRenderer.invoke(IPC.githubDiscovery, request) as Promise<GithubDiscoveryResult>
   },
   cover: {
     bytes: (url) => ipcRenderer.invoke(IPC.colorExtract, url) as Promise<CoverBytes | null>

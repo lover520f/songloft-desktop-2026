@@ -675,6 +675,29 @@ export function setGithubProxy(client: ApiClient, proxy: string): Promise<void> 
   return client.request<void>('/settings/github-proxy', { method: 'PUT', body: { proxy } })
 }
 
+/**
+ * 服务器上保存的 GitHub Token（插件商店「GitHub 发现」用）。
+ *
+ * ★ 与上面那个「GitHub 加速代理」是**两样东西，且互斥**：代理是给匿名请求套的前缀，
+ *   这个 token 是凭据 —— 带它的请求刻意绕过代理（前缀式代理会把 Authorization 丢掉）。
+ * ★ 存在服务端而不是本机：同一台服务器上的客户端共用一份，与私有源 token 同一套语义。
+ *   未配置时为空串；PUT 空串即清除。响应禁止缓存，所以每次进发现页都要重新读。
+ */
+export function getGithubDiscoveryToken(client: ApiClient): Promise<string> {
+  return client
+    .request<{ token?: string }>('/settings/github-discovery-token')
+    .then((res) => res.token ?? '')
+}
+
+export function setGithubDiscoveryToken(client: ApiClient, token: string): Promise<string> {
+  return client
+    .request<{ token?: string }>('/settings/github-discovery-token', {
+      method: 'PUT',
+      body: { token: token.trim() }
+    })
+    .then((res) => res.token ?? '')
+}
+
 export function getProxyAllowlist(client: ApiClient): Promise<string[]> {
   return client
     .request<{ allowlist?: string[] }>('/settings/proxy-private-allowlist')

@@ -63,6 +63,13 @@ export const IPC = {
   appInfo: 'app:info',
   /** 主进程代查 GitHub 上的最新 release（渲染层不直连第三方，也省掉 CORS 与 UA 的坑） */
   clientUpdateCheck: 'app:check-client-update',
+  /**
+   * 主进程代查「GitHub 发现」（插件商店里的那一份社区来源）。
+   *
+   * 与 clientUpdateCheck 同一条理由 —— 渲染层不直连第三方。另外这里还要逐仓库核对清单与
+   * release 资产，一页就是几十个请求，放在主进程才能共享那份 1 小时的清单缓存。
+   */
+  githubDiscovery: 'github:discover',
 
   // ── 迷你窗口（独立 BrowserWindow，见 main/mini-window.ts）──────────────────
   //

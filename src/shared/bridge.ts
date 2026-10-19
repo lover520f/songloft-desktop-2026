@@ -22,6 +22,7 @@ import type {
   WindowState
 } from './ipc'
 import type { StoredCredentials } from './bridge-types'
+import type { GithubDiscoveryRequest, GithubDiscoveryResult } from './github-discovery'
 
 export type { StoredCredentials }
 
@@ -134,6 +135,16 @@ export interface SongloftBridge {
      * 直连第三方会撞上 CORS 与 `User-Agent` 这两个改不动的限制（见 src/main/release.ts）。
      */
     checkClientUpdate(proxyPrefix?: string): Promise<ClientUpdateCheck>
+  }
+  /**
+   * 「GitHub 发现」：插件商店里那一份社区来源。
+   *
+   * 主进程代查（同 app.checkClientUpdate 的理由），并逐仓库核对 `plugin.json` 与它声明的
+   * release 资产 —— 结果里的每一条都是**点安装就能装上**的。失败不抛异常，而是回
+   * `{ ok: false, reason }`：跨 IPC 只剩一句 message，`reason` 才是界面分派文案的依据。
+   */
+  github: {
+    discover(request: GithubDiscoveryRequest): Promise<GithubDiscoveryResult>
   }
   cover: {
     /** 取封面缩略图字节（base64），供 canvas 取主色 —— 绕开跨域画布污染 */
