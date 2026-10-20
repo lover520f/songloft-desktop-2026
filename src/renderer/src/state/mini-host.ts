@@ -51,7 +51,10 @@ function lightOf(): MiniPlayerLight {
     // 收藏表在主窗口这边（迷你窗看不到它），所以由这里查好了递过去
     favorite: song ? usePlaylists.getState().favoriteIds.has(song.id) : false,
     // 强调色同理：它是按封面取出来的（要 canvas + 主进程代取字节），迷你窗算不了
-    accent: useSettings.getState().coverAccent
+    accent: useSettings.getState().coverAccent,
+    // 状态行也一样：文案由播放核心的状态机写（见 player-core 的 loadingText），照抄过去即可
+    status: player.status,
+    error: player.error
   }
 }
 
@@ -91,7 +94,11 @@ function lightKey(light: MiniPlayerLight): string {
     light.muted,
     light.playMode,
     light.favorite,
-    light.accent ?? ''
+    light.accent ?? '',
+    // 状态行必须算进指纹：它在 #3s 边界上单独变化（播放状态、进度都没动），漏了它迷你条
+    // 就会一直显示上一句「正在获取音源…」
+    light.status ?? '',
+    light.error ?? ''
   ].join('|')
 }
 

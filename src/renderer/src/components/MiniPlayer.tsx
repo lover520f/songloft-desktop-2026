@@ -26,6 +26,8 @@
  *       那条：可拖拽区的右键会弹系统菜单）—— 比自绘一张更对。旋钮因此只剩右上角那颗下拉钮。
  *   · 中栏：两行 —— 第一行歌名，第二行「歌手（可滚动）+ 播放时间/时长」。时间**钉在右端**，
  *     歌手再长也挤不到它（见样式表 .mini-info-sub）。
+ *     ★ 第二行兼作**播放状态行**：正在获取音源 / 正在切换第 N 个音源 / 缓冲中 / 放不出来时，
+ *       那里显示的是那句话而不是歌手（与主窗口底栏同一份优先级与文案，见 useNowPlayingStatus）。
  *     **鼠标落在条上那条交互带时中栏换成控制**（音量 / 播放模式 / 收藏）：这三样都要占地方，
  *     常态挂着会一直挤着歌名，而它们又不是「看播放器」时时刻要盯的东西。
  *     ★ 判据是**那条带自己的框** —— 中栏与右侧控件组那一行：**带上下的空带不算**，封面与右上角
@@ -96,6 +98,7 @@ import { MODE_LABEL, modeIcon } from './play-mode'
 import { PlayerProgress } from './PlayerProgress'
 import { Cover, Slider } from './primitives'
 import { fallbackTitle, songCoverUrl } from '@shared/metadata'
+import { useNowPlayingStatus } from '@/hooks/useNowPlayingStatus'
 import { useUnfocusable } from '@/hooks/useUnfocusable'
 import { displayArtist, formatDuration } from '@/lib/format'
 import { isMiniHost } from '@/lib/window-role'
@@ -186,6 +189,19 @@ export function MiniPlayer(): React.JSX.Element {
 
   const duration = player.duration || song?.duration || 0
   const position = scrub ?? player.currentTime
+  /**
+   * 歌手那一行兼作**播放状态行**，与主窗口底栏 / 满窗播放**同一份**优先级与文案
+   * （hooks/useNowPlayingStatus：error → status → 正在获取歌曲信息 → 歌手）。
+   *
+   * ★ 文案不在这里拼：它是播放核心状态机的一部分（「正在获取音源…」「播放失败，正在切换
+   *   第 2 个音源…」「缓冲中…」都带着「试到第几个音源」这种上下文），迷你窗只负责显示。
+   *   跟随者那份来自主窗口的快照（shared/ipc 的 MiniPlayerLight），宿主窗（本地文件会话）
+   *   读的就是播放核心本身 —— 两条路拿到的都是同一句话。
+   */
+  const status = useNowPlayingStatus(song, player.error)
+  const artistLine = status ?? (song ? displayArtist(song.artist) : '')
+  /** 状态行的语气（与底栏那个 data-state 同一套：红字 / 链接色），普通文本时为 undefined */
+  const statusState = player.error ? 'error' : status ? 'loading' : undefined
 
   /**
    * 迷你窗的显示设置菜单：**四根滑块** —— 「播放器不透明度」「歌词面板不透明度」「队列面板不
@@ -368,7 +384,8 @@ export function MiniPlayer(): React.JSX.Element {
                   <ScrollingLine
                     key={`artist-${song?.id ?? 0}`}
                     className="playerbar-artist"
-                    text={song ? displayArtist(song.artist) : ''}
+                    text={artistLine}
+                    state={statusState}
                   />
                   {/* 时间不挂 key：它每秒都在变，重挂纯属浪费；它也永远放得下，不必滚 */}
                   <span className="mini-time">
@@ -725,11 +742,21 @@ const LOOP_DWELL = 0.14
  */
 function ScrollingLine({
   text,
-  className
+  className,
+  state
 }: {
   text: string
   /** 文本自己的样式（.playerbar-title / .playerbar-artist 那一套），行本身不带 */
   className: string
+  /**
+   * 状态行的语气，直接落成 `data-state`（与底栏 `.playerbar-artist` 同一套选择器与颜色）：
+   * `error` 红字、`loading` 链接色。不传 = 普通文本，按 className 自己的颜色显示。
+   *
+   * ★ 挂在**文本副本**上而不是外框上：那条 CSS 的选择器是 `.playerbar-artist[data-state=…]`，
+   *   考究的是「带这个类的那个元素」；挂外框就得再加一条 `.mini-line[data-state] .mini-line-copy`
+   *   的同义规则，颜色会多出第二个出处。
+   */
+  state?: 'error' | 'loading'
 }): React.JSX.Element {
   const outerRef = useRef<HTMLDivElement>(null)
   const copyRef = useRef<HTMLSpanElement>(null)
@@ -773,12 +800,12 @@ function ScrollingLine({
             : undefined
         }
       >
-        <span className={`mini-line-copy ${className}`} ref={copyRef}>
+        <span className={`mini-line-copy ${className}`} data-state={state} ref={copyRef}>
           {text}
         </span>
         {/* 第二份只为「第一份走出去时」垫在后面。读屏软件不该把它念第二遍 */}
         {loop > 0 ? (
-          <span className={`mini-line-copy ${className}`} aria-hidden="true">
+          <span className={`mini-line-copy ${className}`} data-state={state} aria-hidden="true">
             {text}
           </span>
         ) : null}

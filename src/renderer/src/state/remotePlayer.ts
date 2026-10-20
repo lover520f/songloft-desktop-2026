@@ -58,11 +58,7 @@ export const remotePlayer = create<PlayerState>((set, get) => ({
   muted: false,
   playMode: useSettings.getState().settings.playMode,
   error: null,
-  /*
-   * 进度性的那句（正在获取音源 / 正在切换第 N 个音源 / 缓冲中…）**不走镜像**：它只影响
-   * 底栏与满窗播放那一行状态文字，而迷你条上没有这一行（它显示的是歌名与歌手）。
-   * `error` 同理。将来迷你窗要显示它，再按 shared/ipc.ts 的轻快照把它带过去。
-   */
+  /* 状态行（正在获取音源 / 正在切换第 N 个音源 / 缓冲中… / 放不出来）：由快照带过来 */
   status: null,
   lyrics: EMPTY_LYRIC,
   lyricsLoading: false,
@@ -142,7 +138,11 @@ export function applyMiniSnapshot(snapshot: MiniPlayerSnapshot): void {
     duration: light.duration,
     volume: light.volume,
     muted: light.muted,
-    playMode: light.playMode
+    playMode: light.playMode,
+    // 状态行（正在获取音源 / 正在切换第 N 个音源 / 缓冲中… / 放不出来）照抄主窗口那一份：
+    // 措辞归播放核心的状态机所有，迷你窗一个字都不该自己拼（见 shared/ipc 的 MiniPlayerLight）
+    status: light.status,
+    error: light.error
   })
 
   // 收藏与强调色不在 PlayerState 上，各有各的家（收藏见 useMiniView，强调色见 useSettings）

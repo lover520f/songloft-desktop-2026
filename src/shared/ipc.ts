@@ -237,6 +237,16 @@ export interface MiniPlayerLight {
   favorite: boolean
   /** 主窗口按封面取出的强调色。迷你窗自己算不了（那要 canvas + 主进程代取字节） */
   accent: string | null
+  /**
+   * 播放条上那句状态（见 PlayerState 的 `status` / `error`）：正在获取音源、正在切换第 N 个
+   * 音源、缓冲中、以及真的放不出来时的那句结论。
+   *
+   * ★ 文案本身**由主窗口的播放核心写**（state/player-core 的状态机），迷你窗只负责显示 ——
+   *   两边各写一套措辞迟早会漂成两句不一样的话。它俩跟 `accent` 一样属于「主窗口知道、
+   *   迷你窗算不出」的那一类。
+   */
+  status: string | null
+  error: string | null
 }
 
 /**
