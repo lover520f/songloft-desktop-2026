@@ -556,7 +556,12 @@ export const playerCore = create<PlayerState>((set, get) => {
    */
   audio.addEventListener('playing', () => set({ playing: true, buffering: false, error: null }))
   audio.addEventListener('pause', () => {
-    set({ playing: false })
+    /*
+     * 一并收掉加载态：暂停之后没有「正在等数据」这回事。留着它的话，界面会一边显示暂停、
+     * 一边还在转圈并说「正在获取音源…」（state/useNowPlayingStatus 就是按 buffering 判的）。
+     * 重新播放时 play() / waiting 会把它再置起来。
+     */
+    set({ playing: false, buffering: false })
     // 通过暂停操作（而非自动播放）也要同步到托盘与系统媒体控件
     const song = get().currentSong()
     if (song) {
