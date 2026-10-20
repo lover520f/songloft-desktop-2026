@@ -58,6 +58,12 @@ export const remotePlayer = create<PlayerState>((set, get) => ({
   muted: false,
   playMode: useSettings.getState().settings.playMode,
   error: null,
+  /*
+   * 进度性的那句（正在获取音源 / 正在切换第 N 个音源 / 缓冲中…）**不走镜像**：它只影响
+   * 底栏与满窗播放那一行状态文字，而迷你条上没有这一行（它显示的是歌名与歌手）。
+   * `error` 同理。将来迷你窗要显示它，再按 shared/ipc.ts 的轻快照把它带过去。
+   */
+  status: null,
   lyrics: EMPTY_LYRIC,
   lyricsLoading: false,
   lyricFailed: false,
