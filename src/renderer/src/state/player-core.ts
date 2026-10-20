@@ -21,6 +21,9 @@
  *   在这里只做三件事 —— 等一小会儿（给后端重新解析与后台换源留时间）、换一个带 `retry` 的
  *   地址（绕开浏览器缓存复用）、把话说在**播放条上**而不是弹 toast。试满 MAX_PLAY_ATTEMPTS
  *   次仍不出声才跳到下一首，详见 handlePlaybackFailure。
+ * ★ 而且在试满之前**不判死**：底栏说的是「正在重新获取音源」，只有整轮试完才说「无法播放」。
+ *   一次瞬时失败（直链过期 / 后端正在换源 / IO 抖动）很常见，重试往往一两秒就回来了，
+ *   当场把「不可用」写在界面上等于把一次抖动报成了这首歌坏了。
  * ★ 元数据（封面 / 歌词 / 歌手 / 歌名）缺失的补齐**不在这个文件里**：它跟播放没有耦合
  *   （补齐到达时只换队列里那一个对象，不碰 audio），见 state/song-metadata.ts。
  *
@@ -365,6 +368,17 @@ export const playerCore = create<PlayerState>((set, get) => {
         set({ buffering: false, playing: false, error: '浏览器阻止了自动播放，请点一下播放按钮' })
         return
       }
+      /*
+       * AbortError = 这次 play() 被**更新的加载**打断了（用户切歌 / 重试换了地址 / 用户按了暂停），
+       * 属于正常的加载取消，不是「这个源不行」。算成失败会让新歌一开播就顶着上一首的
+       * 「无法播放」，还白扣一次尝试次数。
+       * 此时状态归新的那一次加载所有（它自己会设 buffering）—— 只有在「用户按了暂停」
+       * 这一种情况下才需要我们把加载态收掉，否则会一直转圈。
+       */
+      if (message.includes('Abort') || message.includes('interrupted')) {
+        if (audio.paused) set({ buffering: false })
+        return
+      }
       // 其余 play() 失败与 error 事件同路：都可能是「这个源不行」，交给同一套判定
       handlePlaybackFailure(song, '资源加载失败')
       return
@@ -444,6 +458,13 @@ export const playerCore = create<PlayerState>((set, get) => {
    *   才有跨插件搜索），客户端能做的就是重新要一次地址，`retry` 参数保证这次请求不被浏览器缓存吃掉。
    */
   function handlePlaybackFailure(song: Song, detail: string): void {
+    /*
+     * ★ 只认「此刻正在放的那一首」：切歌 / 换源之后，上一次加载的失败会迟到 —— `play()` 的
+     *   promise 被新一次加载打断时尤其常见。放它进来就会在**新歌刚起播的瞬间**把「无法播放」
+     *   写到播放条上（新歌其实一点问题都没有），还白扣一次尝试次数。
+     */
+    if (get().currentSong()?.id !== song.id) return
+
     const isLocal = song.type === 'local'
     const nextAttempt = currentAttempt + 1
     const maxAttempts = isLocal ? MAX_LOCAL_PLAY_ATTEMPTS : MAX_PLAY_ATTEMPTS
@@ -455,8 +476,13 @@ export const playerCore = create<PlayerState>((set, get) => {
       set({
         buffering: false,
         playing: false,
-        // 「重试」与「联网找源」是两件事：本地文件没有别的源可找，别给它安一个不存在的动作
-        error: isLocal ? '无法播放，正在重试…' : '无法播放，正在联网搜索其他音源…'
+        /*
+         * ★ 还有下一次尝试时**不判死**：说的是「正在重新获取」，不是「无法播放」。
+         *   一次瞬时失败（直链过期 / 后端正在换源 / IO 抖动）在这里是常态，重试往往一两秒
+         *   就回来了；当场把「不可用」写在底栏上，等于把一次抖动报成这首歌坏了。
+         *   「重试」与「联网找源」仍是两件事：本地文件没有别的源可找，别给它安一个不存在的动作。
+         */
+        error: isLocal ? '读取失败，正在重试…' : '音源异常，正在重新获取…'
       })
       clearRetryTimer()
       retryTimer = window.setTimeout(() => {
@@ -524,7 +550,11 @@ export const playerCore = create<PlayerState>((set, get) => {
   audio.addEventListener('durationchange', () => {
     set({ duration: Number.isFinite(audio.duration) ? audio.duration : 0 })
   })
-  audio.addEventListener('playing', () => set({ playing: true, buffering: false }))
+  /*
+   * 真出声了就把「放不出来」那句收掉。绝大多数情况下 startSong 开头已经清过了，这里兜的是
+   * 迟到的那一笔：错误事件比成功晚到一帧时，一首正在正常播放的歌会一直挂着「无法播放」。
+   */
+  audio.addEventListener('playing', () => set({ playing: true, buffering: false, error: null }))
   audio.addEventListener('pause', () => {
     set({ playing: false })
     // 通过暂停操作（而非自动播放）也要同步到托盘与系统媒体控件
@@ -547,6 +577,12 @@ export const playerCore = create<PlayerState>((set, get) => {
   audio.addEventListener('error', () => {
     // 重试时旧地址的失败会迟到：只认「此刻期望在放的那一个」（见 expectedSrc 的说明）
     if (expectedSrc && audio.src !== expectedSrc) return
+
+    /*
+     * code 1 = MEDIA_ERR_ABORTED：加载是被**我们自己**中止的（换 src / 切歌 / 暂停），
+     * 不是源坏了。重试换地址时它几乎必然出现一次，算成失败就会把重试链一次烧掉。
+     */
+    if (audio.error?.code === 1) return
 
     const song = get().currentSong()
     if (!song) return
